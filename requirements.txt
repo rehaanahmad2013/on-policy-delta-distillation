@@ -1,0 +1,7 @@
+accelerate==1.10.1
+datasets==4.0.0
+huggingface-hub[hf_transfer]==0.34.4
+math-verify==0.8.0
+numpy==2.2.6
+transformers==4.55.4
+
