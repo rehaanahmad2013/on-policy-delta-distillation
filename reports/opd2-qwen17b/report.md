@@ -26,18 +26,22 @@ The matched starting checkpoint scored 69.8% on MATH-500 and 10.83% on AIME24 in
 
 The unavailable author repository prevented a line-for-line TRL reproduction. We therefore implemented the paper's token objective directly with PyTorch and Transformers SDPA generation. The baseline and treatment branches differ in one reviewed configuration field, `method: opd` versus `method: opd2`.
 
-For a student-sampled token, the implementation computes:
+For a student-sampled token, the implementation computes a student-weighted top-k baseline:
 
 ```python
-opd_reward = logp_teacher[token] - mean_topk(logp_teacher)
+top_ids = topk(student_logits, 1024)
+top_probs = softmax(student_logits[top_ids])
+opd_reward = logp_teacher[token] - logp_student[token]
+opd_center = sum(top_probs * (logp_teacher[top_ids] - logp_student[top_ids]))
+opd_adv = opd_reward - opd_center
 delta = logp_teacher - logp_teacher_base
-delta_reward = delta[token] - mean_topk(delta)
-active = sign(delta_reward) == sign(opd_reward)
-advantage = reward_scale * delta_reward * active
+delta_adv = delta[token] - sum(top_probs * delta[top_ids])
+active = sign(delta_adv) == sign(opd_adv)
+advantage = reward_scale * delta_adv * active
 loss = -(advantage.detach() * logp_student[token])
 ```
 
-This follows the paper's centered teacher-minus-base reward and joint sign gate. Rewards are centered over the top 1,024 teacher tokens; the reward scale is 0.1, KL coefficient is zero, sampling temperature is 0.7, and the learning-rate schedule matches the paper (AdamW, 5×10⁻⁶ peak, 10% warmup, cosine decay to 10% of peak, unit gradient clipping).
+This follows the paper's centered teacher-minus-base reward and joint sign gate. Baselines use the student distribution renormalized over its top 1,024 tokens; the reward scale is 0.1, KL coefficient is zero, sampling temperature is 0.7, and the learning-rate schedule matches the paper (AdamW, 5×10⁻⁶ peak, 10% warmup, cosine decay to 10% of peak, unit gradient clipping).
 
 Prompts were drawn without answers in a strict 1:1:1 interleave from the public `nvidia/OpenMathReasoning`, `nvidia/OpenScienceReasoning-2`, and `nvidia/OpenCodeReasoning` datasets. Every one of the 6,400 consumed questions per run was unique; domain counts were 2,134 math, 2,133 science, and 2,133 code.
 

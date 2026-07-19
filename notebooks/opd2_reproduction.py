@@ -97,23 +97,27 @@ def _(mo):
     Ordinary OPD rewards a sampled token when the teacher likes it more than the teacher's
     centered top-k alternative. OPD2 first subtracts the base model:
 
-    \[
-    r_{\Delta}(y_t) =
-    \big(\log p_T(y_t)-\log p_B(y_t)\big)
-    - \operatorname{mean}_{v \in \operatorname{topk}(T)}
-    \big(\log p_T(v)-\log p_B(v)\big).
-    \]
+        \[
+        A_{\Delta}(y_t) =
+        \big(\log p_T(y_t)-\log p_B(y_t)\big)
+        - \sum_{v \in \operatorname{topk}(p_\theta)} \bar p_\theta(v)
+        \big(\log p_T(v)-\log p_B(v)\big).
+        \]
 
     A joint sign gate keeps this delta reward only where it agrees with the ordinary OPD
     advantage. In seed 1, that gate retained **73.32% of tokens on average** and stayed
     between 70.84% and 75.89%, so the mechanism was active and stable.
 
     ```python
-    opd_reward = teacher_logp[token] - mean_topk(teacher_logp)
-    delta = teacher_logp - base_logp
-    delta_reward = delta[token] - mean_topk(delta)
-    active = sign(delta_reward) == sign(opd_reward)
-    advantage = 0.1 * delta_reward * active
+        top_ids = topk(student_logits, 1024)
+        top_probs = softmax(student_logits[top_ids])
+        opd_reward = teacher_logp[token] - student_logp[token]
+        opd_center = sum(top_probs * (teacher_logp[top_ids] - student_logp[top_ids]))
+        opd_adv = opd_reward - opd_center
+        delta = teacher_logp - base_logp
+        delta_adv = delta[token] - sum(top_probs * delta[top_ids])
+        active = sign(delta_adv) == sign(opd_adv)
+        advantage = 0.1 * delta_adv * active
     ```
     """)
     return
