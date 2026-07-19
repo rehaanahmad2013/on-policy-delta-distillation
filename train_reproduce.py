@@ -35,12 +35,13 @@ def log(message: str, *, rank: int = 0, force: bool = False) -> None:
 
 
 def distributed_setup() -> tuple[int, int, torch.device]:
-    dist.init_process_group("nccl")
-    rank = dist.get_rank()
-    world = dist.get_world_size()
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
-    return rank, world, torch.device("cuda", local_rank)
+    device = torch.device("cuda", local_rank)
+    dist.init_process_group("nccl", device_id=device)
+    rank = dist.get_rank()
+    world = dist.get_world_size()
+    return rank, world, device
 
 
 def barrier() -> None:
@@ -72,7 +73,10 @@ def take_unique(stream: Iterable[dict[str, Any]], field: str, count: int) -> lis
 
 def prepare_prompt_cache(path: Path, seed: int) -> None:
     """Build the paper's 1:1:1 question-only mixture without redistributing it."""
-    per_domain = 33_334
+    # OpenCodeReasoning split_0 exposes 15,703 unique public question texts.
+    # A 15k/domain pool preserves balanced, no-repeat sampling while remaining
+    # comfortably larger than the 25,600 total prompts consumed by training.
+    per_domain = 15_000
     specs = [
         ("math", "nvidia/OpenMathReasoning", "default", "additional_problems", "problem"),
         ("science", "nvidia/OpenScienceReasoning-2", "default", "train", "input"),
@@ -80,7 +84,7 @@ def prepare_prompt_cache(path: Path, seed: int) -> None:
     ]
     rows: list[dict[str, str]] = []
     for offset, (domain, repo, config, split, field) in enumerate(specs):
-        stream = load_dataset(repo, config, split=split, streaming=True)
+        stream = load_dataset(repo, config, split=split, streaming=True).select_columns([field])
         stream = stream.shuffle(seed=seed + offset, buffer_size=20_000)
         prompts = take_unique(stream, field, per_domain)
         rows.extend({"domain": domain, "prompt": prompt} for prompt in prompts)
