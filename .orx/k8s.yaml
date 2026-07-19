@@ -11,7 +11,7 @@ spec:
       containers:
         - name: reproduce
           image: pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
-          command: ["bash", "-c", "$ORX_SCRIPT"]
+          command: ["bash", "-c", "eval \"$ORX_SCRIPT\""]
           resources:
             requests:
               nvidia.com/gpu: "8"
@@ -21,4 +21,3 @@ spec:
               nvidia.com/gpu: "8"
               cpu: "120"
               memory: "850Gi"
-
