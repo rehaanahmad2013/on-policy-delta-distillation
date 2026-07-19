@@ -1,95 +1,104 @@
-# On-Policy Delta Distillation on Qwen3-1.7B: a bounded reproduction
+# On-Policy Delta Distillation: a matched Qwen3-1.7B reproduction
 
-![Paper and observed OPD versus OPD2 results](images/headline_benchmarks.png)
+![Paper and observed OPD versus OPD2 benchmark scores](images/headline_benchmarks.png)
 
 [![Open in molab](https://marimo.io/molab-shield.svg)](https://molab.marimo.io/github/rehaanahmad2013/on-policy-delta-distillation/blob/main/notebooks/opd2_reproduction.py)
 
-The paper [*On-Policy Delta Distillation*](https://arxiv.org/abs/2607.15161) asks whether a student should imitate everything its instruction-tuned teacher knows, or only what the teacher learned beyond its own base model. Its answer is OPD2: score each sampled student token by the teacher-minus-base log-probability change, center the score over a top-k vocabulary, and retain tokens whose ordinary teacher advantage has the same sign. The paper reports that this change improves Qwen3-1.7B over ordinary on-policy distillation (OPD).
+The paper asks whether a student should imitate everything its teacher prefers, or only what the teacher *learned during reasoning post-training*. Its answer, On-Policy Delta Distillation (OPD2), scores each student-generated token by the log-probability difference between an instruction-tuned teacher and that teacher's base checkpoint. This reproduction tests the paper's Qwen3-1.7B non-thinking comparison against ordinary on-policy distillation (OPD).
 
-Our first matched 100-step seed did **not show that quality advantage under the bounded setup**. OPD2 was 0.2 percentage points below OPD on MATH-500 and 0.83 points below it on AIME 2024. The runtime claim did align: OPD2 finished in 3.327 hours end to end, just 1.96% slower than OPD's 3.263 hours. A second matched seed was launched to test whether the small quality differences persist; its results are incorporated in the final assessment below.
+**Assessment: partially reproduced.** Across two matched seeds, ordinary OPD reached **71.7% MATH-500 / 7.92% AIME 2024**, while OPD2 reached **72.0% / 9.17%**. The paper reports 81.0% / 36.7% for OPD and 83.9% / 41.0% for OPD2. OPD2 led in the two-seed mean, but by only +0.3 and +1.25 points, and the ordering reversed between seeds. That is directionally aligned but inconclusive under this bounded setup.
 
-All experiments used the OpenResearch Kubernetes backend. Each method used 8 NVIDIA RTX PRO 6000 Blackwell GPUs, with a peak of 16 GPUs concurrently allocated. Exact run commands and branch links appear in the [public README](../../README.md).
+This was a Kubernetes reproduction on **NVIDIA RTX PRO 6000 Blackwell** GPUs, with **16 GPUs peak concurrent**. The full campaign occupied the cluster for **7.28 elapsed hours**; a matched 100-step pair completed in at most 3.33 hours. The public [tutorial notebook](../../notebooks/opd2_reproduction.py) embeds the evidence and opens directly in Molab without rerunning training.
 
-## Evidence at a glance
+## What was tested
 
-| Claim | Paper evidence | Observed seed 1 | Assessment |
-|---|---:|---:|---|
-| OPD2 beats OPD on MATH-500 | 83.9 vs 81.0 (+2.9 pp) | 71.2 vs 71.4 (−0.2 pp) | Inconclusive under this setup |
-| OPD2 beats OPD on AIME 2024 | 41.0 vs 36.7 (+4.3 pp) | 6.67 vs 7.50 (−0.83 pp) | Inconclusive under this setup |
-| OPD2 remains a short 100-step run | 5.5 h vs 4.4 h on 8× H100 | 3.327 h vs 3.263 h on 8× RTX PRO 6000 | Aligned |
+The controlled variable was the token advantage. For a student rollout token \(y_t\), ordinary OPD uses the centered teacher-minus-student reward. OPD2 instead centers the teacher-minus-teacher-base reward and keeps it only when its sign agrees with the centered OPD advantage:
 
-The matched starting checkpoint scored 69.8% on MATH-500 and 10.83% on AIME24 in both jobs. OPD improved MATH-500 by 1.6 points and OPD2 by 1.4 points. Both moved backward on the small AIME evaluation, where four repetitions yield only 120 samples.
+\[
+R_{OPD}=\log p_T(y_t)-\log p_S(y_t),\qquad
+R_{\Delta}=\log p_T(y_t)-\log p_{T_0}(y_t)
+\]
 
-![Change from the shared original checkpoint](images/within_run_gains.png)
+\[
+A_{OPD}=R_{OPD}-\mathbb E_{p_S}[R_{OPD}],\qquad
+A_{OPD^2}=\begin{cases}A_\Delta & A_\Delta A_{OPD}>0\\0&\text{otherwise.}\end{cases}
+\]
 
-## What was implemented
-
-The unavailable author repository prevented a line-for-line TRL reproduction. We therefore implemented the paper's token objective directly with PyTorch and Transformers SDPA generation. The baseline and treatment branches differ in one reviewed configuration field, `method: opd` versus `method: opd2`.
-
-For a student-sampled token, the implementation computes a student-weighted top-k baseline:
+The expectation is approximated over the student's top 1,024 tokens, matching the paper. In the implementation, the consequential branch is deliberately small:
 
 ```python
-top_ids = topk(student_logits, 1024)
-top_probs = softmax(student_logits[top_ids])
-opd_reward = logp_teacher[token] - logp_student[token]
-opd_center = sum(top_probs * (logp_teacher[top_ids] - logp_student[top_ids]))
-opd_adv = opd_reward - opd_center
-delta = logp_teacher - logp_teacher_base
-delta_adv = delta[token] - sum(top_probs * delta[top_ids])
-active = sign(delta_adv) == sign(opd_adv)
-advantage = reward_scale * delta_adv * active
-loss = -(advantage.detach() * logp_student[token])
+delta_reward = teacher_taken - teacher_base_taken
+delta_expected = (student_top_probs *
+                  (teacher_top - teacher_base_top)).sum(-1)
+delta_advantage = delta_reward - delta_expected
+active = delta_advantage * opd_advantage > 0
+advantage = torch.where(active, delta_advantage, 0.0)
 ```
 
-This follows the paper's centered teacher-minus-base reward and joint sign gate. Baselines use the student distribution renormalized over its top 1,024 tokens; the reward scale is 0.1, KL coefficient is zero, sampling temperature is 0.7, and the learning-rate schedule matches the paper (AdamW, 5×10⁻⁶ peak, 10% warmup, cosine decay to 10% of peak, unit gradient clipping).
+The student is `Qwen/Qwen3-1.7B`; the teacher and teacher base are `Qwen/Qwen3-4B-Instruct-2507` and `Qwen/Qwen3-4B-Base`. Every arm used 100 steps, one completion per question, temperature 0.7, AdamW at 5e-6 with cosine decay and 10% warmup, gradient clipping at 1.0, reward scale 0.1, and zero KL penalty. Manual eight-rank data parallelism kept student updates synchronized while each rank generated its own on-policy slice.
 
-Prompts were drawn without answers in a strict 1:1:1 interleave from the public `nvidia/OpenMathReasoning`, `nvidia/OpenScienceReasoning-2`, and `nvidia/OpenCodeReasoning` datasets. Every one of the 6,400 consumed questions per run was unique; domain counts were 2,134 math, 2,133 science, and 2,133 code.
+## Faithfulness and bounded substitutions
 
-## Consequential substitutions
+The announced author repository was not public, so this is a direct PyTorch/Transformers implementation of the paper's TRL objective. The paper's vLLM-colocated rollout backend was replaced with Transformers SDPA generation. A full-setting scout measured about 644 seconds per OPD step and 651 seconds per OPD2 step, projecting roughly 18 hours for 100 steps—past the hard compute deadline. The completed comparison therefore made two explicit reductions:
 
-The scientific comparison kept models, prompt order, optimizer, number of steps, sampling temperature, reward scaling, centering, and evaluation identical. Two changes bounded wall time on the available cluster:
-
-| Setting | Paper | Reproduction | Consequence |
+| Item | Paper | Reproduction | Consequence |
 |---|---:|---:|---|
-| Global batch | 256 | 64 | 6,400 rather than 25,600 sampled prompts |
-| Maximum rollout | 8,192 | 4,096 tokens | Long reasoning traces can be truncated |
-| Rollout engine | TRL + colocated vLLM | direct PyTorch + Transformers SDPA | Different systems performance |
-| Evaluation | 14 benchmarks, repeated | MATH-500 once; AIME24 four times | Narrower and noisier quality estimate |
-| Seeds | not the paper's public artifacts | two matched seeds | Robustness check, not exact paper randomness |
+| Global batch per step | 256 | 64 | 6,400 rather than 25,600 consumed prompts |
+| Maximum training completion | 8,192 | 4,096 tokens | The cap bound many later rollouts |
+| Training steps | 100 | 100 | The full optimization horizon was retained |
+| Training mixture | 1:1:1 math/science/code | 1:1:1 math/science/code | Public prompt-only splits; exact domain balance |
+| Evaluation | 14 benchmarks, repeated | MATH-500 once; AIME 2024 four times | Focused evidence; AIME remains high variance |
+| Hardware | 8× H100 | 8 GPUs/run, RTX PRO 6000 Blackwell | Throughput is not directly comparable |
 
-Before downscaling, one full-setting profile step was run for each method at batch 256 and 8K completions. OPD took 644.17 seconds and OPD2 651.33 seconds, a 1.11% increment for the extra teacher-base pass. Those profiles established feasibility but were intentionally stopped after one step so the claim-critical matched 100-step pair could finish.
+Each seed began from the same checkpoint and used matched prompts, sampling seed, optimization, and evaluation in its OPD/OPD2 pair. Seed two changed only the shared seed. This is a faithful mechanism test, not a full-scale numerical replication.
 
-## Training behavior and diagnostics
+## Benchmark evidence
 
-![Rollout length and OPD2 gate behavior](images/training_dynamics.png)
+![Change from the original checkpoint](images/within_run_gains.png)
 
-OPD2's joint sign gate retained 73.32% of tokens on average in seed 1, ranging from 70.84% to 75.89%. The gate did not collapse. Pre-clip gradient norms stayed finite; maxima were 2.31 for OPD and 1.32 for OPD2, with the configured unit clipping applied.
+| Evidence | Original | OPD | OPD2 | OPD2 − OPD | Assessment |
+|---|---:|---:|---:|---:|---|
+| Paper, MATH-500 | 68.6 | 81.0 | 83.9 | +2.9 | OPD2 advantage reported |
+| Observed, MATH-500, two-seed mean | 69.9 | 71.7 | 72.0 | +0.3 | Directionally aligned; small and seed-sensitive |
+| Paper, AIME 2024 | 14.2 | 36.7 | 41.0 | +4.3 | OPD2 advantage reported |
+| Observed, AIME 2024, two-seed mean | 10.83 | 7.92 | 9.17 | +1.25 | Directionally aligned; high variance |
 
-The bounded rollout length is a real limitation, not a cosmetic setting. At least one completion reached 4,096 tokens in 61 of 100 OPD batches and 73 of 100 OPD2 batches. Average completion length was 2,222 tokens for OPD and 2,495 for OPD2. This changes the on-policy data distribution and is a plausible reason the paper's quality ordering did not appear.
+Seed one put OPD2 below OPD on MATH-500 (71.2 vs 71.4) and AIME (6.67 vs 7.50); seed two put OPD2 above OPD (72.8 vs 72.0 and 11.67 vs 8.33). Thus neither benchmark showed a seed-stable ordering. The observed mean gaps are 10% and 29% of the paper's reported MATH and AIME gaps, respectively. AIME used 120 sampled answers per checkpoint, so one correct answer changes the score by 0.83 points.
 
-## Runtime evidence
+The before/after comparison is also informative. Relative to each matched original checkpoint, OPD gained 1.8 MATH points and lost 2.92 AIME points on average; OPD2 gained 2.1 MATH points and lost 1.67 AIME points. Because the two methods generate different rollouts as learning progresses, exact prompt and seed matching controls the starting conditions but cannot make their stochastic trajectories identical.
 
-![Paper and observed runtime](images/runtime_comparison.png)
+## What happened during training
 
-| Method | Training | Setup + before/after evaluation | End to end | Relative to OPD |
-|---|---:|---:|---:|---:|
-| OPD | 3.039 h | 0.224 h | 3.263 h | — |
-| OPD2 | 3.094 h | 0.233 h | 3.327 h | +1.96% total |
+![Completion length and OPD2 sign-agreement rate](images/training_dynamics.png)
 
-The paper reports 4.4 hours for OPD and 5.5 hours for OPD2 on eight H100s, a 25% increment. On eight RTX PRO 6000 Blackwell GPUs, this implementation's extra base forward pass added 3.30 seconds to the median step (111.55 vs 109.77 seconds) and 197.67 seconds across training. OPD2 generated longer completions on average, so total time combines method cost with a changed sampled-token workload. Even so, both 100-step jobs completed in a short post-training window.
+Both objectives optimized stably for all 100 steps. OPD2's sign condition retained **72.91%** of token rewards on average, so teacher-base subtraction materially changed the gradient rather than behaving like ordinary OPD. The active fraction was stable across training. Mean completion length was 2,249 tokens for OPD and 2,489 for OPD2; at least one completion hit the 4,096-token cap in 61/66 OPD steps and 73/78 OPD2 steps across seeds one/two. That ceiling is the most consequential departure from the paper: it can truncate long reasoning and alter both the on-policy distribution and the dense token signal.
+
+The training curves are diagnostics rather than benchmark evidence. Loss values can cross zero because this is an advantage-weighted policy objective; finite gradients, completed optimizer steps, matched checkpoint evaluations, and held-out accuracy are the relevant checks.
+
+## Runtime claim
+
+![Paper H100 and observed RTX PRO 6000 runtime](images/runtime_comparison.png)
+
+The paper reports 4.4 hours for OPD and 5.5 hours for OPD2 on eight H100s, a 25% increase. Here, seed-level end-to-end means were **3.272 hours for OPD** and **3.322 hours for OPD2**, an overhead of **1.52%**. Training-only means were 3.050 and 3.093 hours (+1.43%). A separate paper-scale batch-256/8K one-step profile measured 644.17 seconds for OPD and 651.33 for OPD2 (+1.11%).
+
+This supports the qualitative claim that the extra teacher-base forward pass still fits a short post-training window under the bounded recipe. It does not establish H100-equivalent throughput: GPU architecture, SDPA rather than vLLM, shorter rollouts, and smaller batches all differ. All reported times are actual harness wall times from Kubernetes logs, including model setup and both evaluations.
 
 ## Claim-by-claim assessment
 
-**Teacher-minus-base delta rewards outperform ordinary OPD.** The first bounded seed did not show the reported direction: OPD2 trailed by 0.2 points on MATH-500 and 0.83 points on AIME24. Both differences are small relative to the evaluation's sampling and training variance, especially AIME's 120 samples. Because the run used one quarter of the paper's batch and half its rollout limit, the appropriate assessment is **inconclusive under this setup**, not a claim about the full paper recipe.
+| Target claim | Paper result | Observed result | Assessment | Compute |
+|---|---|---|---|---|
+| Teacher-minus-base delta rewards outperform ordinary OPD for Qwen3-1.7B reasoning | MATH-500 +2.9 pp and AIME24 +4.3 pp for OPD2 over OPD | Two-seed mean: +0.3 pp MATH, +1.25 pp AIME; seed-level signs split | **Inconclusive under this setup** | Two matched seeds; each run 8× RTX PRO 6000 Blackwell on Kubernetes |
+| 100-step OPD2 remains a short post-training run despite an extra forward pass | 5.5 h OPD2 vs 4.4 h OPD on 8× H100 | 3.322 h mean total, 1.52% over matched OPD | **Aligned** | Peak 16 GPUs concurrent; 7.28 h campaign wall time |
 
-**The extra base forward pass preserves a short post-training window.** This was **aligned**. OPD2 completed 100 steps in 3.094 training hours and 3.327 hours end to end on eight RTX PRO 6000 Blackwell GPUs. The matched OPD job took 3.039 and 3.263 hours. The full-setting one-step profile independently showed a 1.11% step-time increment.
+The performance claim requires the paper-scale 25,600 rollouts at 8K, the authors' exact modified TRL/vLLM stack, and the broader repeated benchmark suite for a stronger test. The present run should not be used to conclude that the paper's claim is generally incorrect; it says only that two reduced-scale matched seeds produced a smaller, seed-sensitive mean advantage.
 
-## What a full reproduction still needs
+## Provenance
 
-A decisive test of the quality claim would use the paper's global batch 256 and 8,192-token rollouts for all 100 steps, the author's eventual TRL/vLLM implementation, the complete 14-benchmark suite with the paper's repeated-sampling protocol, and multiple training seeds. The public-dataset prompt fields should also be checked against the author's exact preprocessing once their repository is released.
+The exact command on every experiment node was `bash run.sh`; hyperparameters live in committed `config.json` rather than command-line overrides.
 
-## Reproducibility and provenance
+- [Full-setting OPD scout](https://github.com/rehaanahmad2013/on-policy-delta-distillation/tree/orx/opd-balanced-consumed-prompts) and [OPD2 scout](https://github.com/rehaanahmad2013/on-policy-delta-distillation/tree/orx/opd2-balanced-consumed-prompts): established that the 8K/batch-256 setting would miss the deadline.
+- [OPD seed one](https://github.com/rehaanahmad2013/on-policy-delta-distillation/tree/orx/opd-64-batch-4k-completion) and [OPD2 seed one](https://github.com/rehaanahmad2013/on-policy-delta-distillation/tree/orx/opd2-64-batch-4k-completion): first complete matched pair.
+- [OPD seed two](https://github.com/rehaanahmad2013/on-policy-delta-distillation/tree/orx/opd-replicate-seed) and [OPD2 seed two](https://github.com/rehaanahmad2013/on-policy-delta-distillation/tree/orx/opd2-replicate-seed): robustness pair.
+- [Paper 2607.15161](https://arxiv.org/abs/2607.15161), [public code](https://github.com/rehaanahmad2013/on-policy-delta-distillation), and [self-contained Molab notebook](https://molab.marimo.io/github/rehaanahmad2013/on-policy-delta-distillation/blob/main/notebooks/opd2_reproduction.py).
 
-The source, frozen configurations, structured result data, figure renderer, and self-contained tutorial notebook are in the public repository. The notebook opens with embedded evidence and does not require readers to rerun training. Launch commands are reproduced verbatim from `orx exp status` in the README; raw run IDs and setup lineage remain in OpenResearch experiment descriptions.
-
-Kubernetes was used throughout. GPU model: NVIDIA RTX PRO 6000 Blackwell. Peak concurrent GPU count: 16. Actual elapsed campaign wall time is reported in `autoresearch.json` and the README after the robustness pair finishes.
+Kubernetes was used for every experiment. The GPU model was NVIDIA RTX PRO 6000 Blackwell, the peak concurrent allocation was 16 GPUs, and actual elapsed wall time was 7.28 hours (2026-07-19 09:13:54–16:30:42 UTC).

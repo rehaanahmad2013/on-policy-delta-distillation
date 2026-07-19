@@ -15,6 +15,13 @@ DATA = json.loads((ROOT / "results" / "reproduction_summary.json").read_text())
 OUT = ROOT / "reports" / "opd2-qwen17b" / "images"
 OUT.mkdir(parents=True, exist_ok=True)
 
+
+def run_view(method: str) -> dict:
+    """Prefer the two-seed aggregate while retaining seed-one compatibility."""
+    if "aggregate" in DATA:
+        return DATA["aggregate"][method]
+    return DATA["runs"][method]
+
 COLORS = {"OPD": "#5065A8", "OPD2": "#E07A5F", "Original": "#9AA0A6"}
 plt.rcParams.update(
     {
@@ -42,8 +49,8 @@ width = 0.18
 series = [
     ("Paper OPD", [DATA["paper"]["opd"]["math500"], DATA["paper"]["opd"]["aime24"]], COLORS["OPD"], "//"),
     ("Paper OPD2", [DATA["paper"]["opd2"]["math500"], DATA["paper"]["opd2"]["aime24"]], COLORS["OPD2"], "//"),
-    ("Observed OPD", [DATA["runs"]["opd"]["final"]["math500"], DATA["runs"]["opd"]["final"]["aime24"]], COLORS["OPD"], None),
-    ("Observed OPD2", [DATA["runs"]["opd2"]["final"]["math500"], DATA["runs"]["opd2"]["final"]["aime24"]], COLORS["OPD2"], None),
+    ("Observed OPD", [run_view("opd")["final"]["math500"], run_view("opd")["final"]["aime24"]], COLORS["OPD"], None),
+    ("Observed OPD2", [run_view("opd2")["final"]["math500"], run_view("opd2")["final"]["aime24"]], COLORS["OPD2"], None),
 ]
 for index, (label, values, color, hatch) in enumerate(series):
     bars = ax.bar(x + (index - 1.5) * width, values, width, label=label, color=color, hatch=hatch, alpha=0.95)
@@ -61,10 +68,10 @@ save(fig, "headline_benchmarks.png")
 fig, ax = plt.subplots(figsize=(8.8, 4.6))
 labels = ["OPD\nMATH-500", "OPD2\nMATH-500", "OPD\nAIME 2024", "OPD2\nAIME 2024"]
 values = [
-    DATA["runs"]["opd"]["delta"]["math500"],
-    DATA["runs"]["opd2"]["delta"]["math500"],
-    DATA["runs"]["opd"]["delta"]["aime24"],
-    DATA["runs"]["opd2"]["delta"]["aime24"],
+    run_view("opd")["delta"]["math500"],
+    run_view("opd2")["delta"]["math500"],
+    run_view("opd")["delta"]["aime24"],
+    run_view("opd2")["delta"]["aime24"],
 ]
 bars = ax.bar(labels, values, color=[COLORS["OPD"], COLORS["OPD2"], COLORS["OPD"], COLORS["OPD2"]])
 ax.axhline(0, color="#333333", linewidth=0.8)
@@ -78,7 +85,8 @@ save(fig, "within_run_gains.png")
 # 3. Mechanism and rollout behavior over training.
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9.4, 6.3), sharex=True)
 for key, label in (("opd", "OPD"), ("opd2", "OPD2")):
-    trajectory = DATA["runs"][key]["trajectory"]
+    view = run_view(key)
+    trajectory = view.get("mean_trajectory", view.get("trajectory"))
     steps = [row["step"] for row in trajectory]
     lengths = [row["mean_completion_length"] for row in trajectory]
     ax1.plot(steps, lengths, label=label, color=COLORS[label], linewidth=1.8)
@@ -87,7 +95,8 @@ ax1.set_ylabel("Mean completion tokens")
 ax1.set_title("Rollouts lengthened and frequently reached the bounded 4K cap")
 ax1.legend(frameon=False, ncol=3)
 ax1.grid(alpha=0.18)
-opd2_trajectory = DATA["runs"]["opd2"]["trajectory"]
+opd2_view = run_view("opd2")
+opd2_trajectory = opd2_view.get("mean_trajectory", opd2_view.get("trajectory"))
 ax2.plot(
     [row["step"] for row in opd2_trajectory],
     [100 * row["active_fraction"] for row in opd2_trajectory],
@@ -106,7 +115,7 @@ save(fig, "training_dynamics.png")
 fig, ax = plt.subplots(figsize=(9.2, 4.8))
 x = np.arange(2)
 paper = [DATA["paper"]["runtime_hours"]["opd"], DATA["paper"]["runtime_hours"]["opd2"]]
-observed = [DATA["runs"]["opd"]["timing_hours"]["total"], DATA["runs"]["opd2"]["timing_hours"]["total"]]
+observed = [run_view("opd")["timing_hours"]["total"], run_view("opd2")["timing_hours"]["total"]]
 bars1 = ax.bar(x - 0.18, paper, 0.36, label="Paper: 8× H100", color="#8D99AE", hatch="//")
 bars2 = ax.bar(x + 0.18, observed, 0.36, label="Observed: 8× RTX PRO 6000", color="#2A9D8F")
 ax.bar_label(bars1, fmt="%.2f h", padding=3)
