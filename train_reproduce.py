@@ -72,21 +72,28 @@ def take_unique(stream: Iterable[dict[str, Any]], field: str, count: int) -> lis
 
 def prepare_prompt_cache(path: Path, seed: int) -> None:
     """Build the paper's 1:1:1 question-only mixture without redistributing it."""
-    per_domain = 33_334
+    # The public code split has 15,703 embedded unique prompts.  Fifteen
+    # thousand per domain is still larger than the 8,534/domain maximum consumed
+    # by 100 x 256 examples, so every training question remains unique.
+    per_domain = 15_000
     specs = [
         ("math", "nvidia/OpenMathReasoning", "default", "additional_problems", "problem"),
         ("science", "nvidia/OpenScienceReasoning-2", "default", "train", "input"),
         ("code", "nvidia/OpenCodeReasoning", "split_0", "split_0", "input"),
     ]
-    rows: list[dict[str, str]] = []
+    prompts_by_domain: dict[str, list[str]] = {}
     for offset, (domain, repo, config, split, field) in enumerate(specs):
         stream = load_dataset(repo, config, split=split, streaming=True)
+        stream = stream.select_columns([field])
         stream = stream.shuffle(seed=seed + offset, buffer_size=20_000)
         prompts = take_unique(stream, field, per_domain)
-        rows.extend({"domain": domain, "prompt": prompt} for prompt in prompts)
+        prompts_by_domain[domain] = prompts
         print(f"DATASET domain={domain} prompts={len(prompts)} source={repo}/{config}/{split}", flush=True)
-    rng = random.Random(seed)
-    rng.shuffle(rows)
+    rows = [
+        {"domain": domain, "prompt": prompts_by_domain[domain][index]}
+        for index in range(per_domain)
+        for domain in ("math", "science", "code")
+    ]
     path.write_text(json.dumps(rows), encoding="utf-8")
 
 
