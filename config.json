@@ -3,7 +3,7 @@
   "student_model": "Qwen/Qwen3-1.7B",
   "teacher_model": "Qwen/Qwen3-4B-Instruct-2507",
   "teacher_base_model": "Qwen/Qwen3-4B-Base",
-  "seed": 260715161,
+  "seed": 260715162,
   "steps": 100,
   "global_batch_size": 64,
   "generation_batch_size": 8,
